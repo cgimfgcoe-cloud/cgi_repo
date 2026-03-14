@@ -797,32 +797,14 @@ const Q = (function(){
 
   // ── WEIGHTED CATEGORY DISTRIBUTION ──
   // Priority 4 cats get weight 10, others weight 1 -- ensures 10K+ per priority cat
-  const catWeights = {
-    'Oracle OAC - Dashboards & Reports': 10,
-    'Oracle EBS - Procurement': 10,
-    'Oracle EBS - Technical / Development': 10,
-    'Oracle EBS - Order Management': 10,
-    'Oracle EBS - Accounts Payable': 2,
-    'Oracle EBS - General Ledger': 2,
-    'Oracle EBS - Human Resources': 1,
-    'Oracle EBS - Fixed Assets': 1,
-    'Oracle EBS - Accounts Receivable': 2,
-    'Oracle DBA - Database Administration': 2,
-    'Oracle DBA - RAC & Grid Infrastructure': 1,
-    'Oracle DBA - Performance Tuning': 1,
-    'Oracle DBA - Backup & Recovery': 1,
-    'Oracle Integration': 1,
-    'Oracle APEX': 1,
-    'Oracle Cloud Infrastructure': 1,
-    'Oracle EBS - Payroll': 1,
-    'Oracle EBS - Inventory & WIP': 1,
-  };
 
-  // Build weighted pool (priority cats weight=10 → ~17K each out of 100K)
-  const weightedCats = [];
-  Object.entries(catWeights).forEach(([cat, w]) => {
-    for (let i = 0; i < w; i++) weightedCats.push(cat);
-  });
+  const priorityCats = [
+    'Oracle OAC - Dashboards & Reports',
+    'Oracle EBS - Procurement',
+    'Oracle EBS - Technical / Development',
+    'Oracle EBS - Order Management'
+  ];
+  const allCatKeys = Object.keys(topics_by_cat);
 
   // Seed with handwritten questions that have answers
   const seeded = [...ebs_ap, ...ebs_gl, ...ebs_po, ...ebs_hr, ...ebs_fa, ...oac_dash,
@@ -831,21 +813,67 @@ const Q = (function(){
     .filter(q => q.answers && q.answers.length > 0);
 
   const generated = [...seeded];
+
+  // Build ALL unique base combos: cat x topic x template
+  const baseCombos = [];
+  for (const cat of allCatKeys) {
+    for (const topic of topics_by_cat[cat]) {
+      for (let ti = 0; ti < questionTemplates.length; ti++) {
+        baseCombos.push({ cat, topic, ti });
+      }
+    }
+  }
+  // baseCombos.length ≈ 10800 unique base titles
+
   const TARGET = 100000;
-  let idx = 0;
+  const PRIORITY_MIN = 10000;
+
+  // Track how many each priority cat has
+  const priorityCounts = {};
+  priorityCats.forEach(c => priorityCounts[c] = seeded.filter(q => q.category === c).length);
+
+  // Track seen titles to guarantee no duplicates
+  const seenTitles = new Set(seeded.map(q => q.title));
+
+  let idx = 0; // global rotation counter for authors/dates
+
+  // We iterate combos in passes. Pass 0 = base title, pass N = title + unique numeric tag
+  // Each pass gives ~10800 new unique titles → 10 passes = 108000 → enough for 100K
+  let pass = 0;
+  let comboPos = 0;
+
+  // Priority cat combos separated for fast-fill phase
+  const prioritySet = new Set(priorityCats);
+  const priorityBaseCombos = baseCombos.filter(c => prioritySet.has(c.cat));
+  let prComboPos = 0;
+  let prPass = 0;
 
   while (generated.length < TARGET) {
-    // Category: use weighted pool → priority cats appear 10x more
-    const cat = weightedCats[idx % weightedCats.length];
-    const topics = topics_by_cat[cat];
-    // Cycle topics and templates independently of cat cycling
-    const topic = topics[Math.floor(idx / weightedCats.length) % topics.length];
-    const tmpl = questionTemplates[Math.floor(idx / (weightedCats.length * topics.length)) % questionTemplates.length];
-    // Pass number ensures titles stay unique even after exhausting all topic+template combos
-    const pass = Math.floor(idx / (weightedCats.length * topics.length * questionTemplates.length));
-    const title = pass === 0
-      ? tmpl.t.replace(/{topic}/g, topic)
-      : tmpl.t.replace(/{topic}/g, topic) + ' (Part ' + (pass + 1) + ')';
+    const allPriorityMet = priorityCats.every(c => priorityCounts[c] >= PRIORITY_MIN);
+
+    let cat, topic, ti;
+
+    if (!allPriorityMet) {
+      // Fast-fill priority cats first — cycle through priority combos with pass suffix
+      if (prComboPos >= priorityBaseCombos.length) { prComboPos = 0; prPass++; }
+      ({ cat, topic, ti } = priorityBaseCombos[prComboPos++]);
+    } else {
+      // All priority cats satisfied — cycle all combos for remaining fill
+      if (comboPos >= baseCombos.length) { comboPos = 0; pass++; }
+      ({ cat, topic, ti } = baseCombos[comboPos++]);
+    }
+
+    const tmpl = questionTemplates[ti];
+    const baseTitle = tmpl.t.replace(/{topic}/g, topic);
+
+    // Make title unique: use pass/prPass suffix only when needed
+    const currentPass = !allPriorityMet ? prPass : pass;
+    let title = currentPass === 0 ? baseTitle : `${baseTitle} [${currentPass}]`;
+
+    // Final safety: if still a duplicate (edge case), append idx
+    if (seenTitles.has(title)) title = `${baseTitle} (#${idx})`;
+    if (seenTitles.has(title)) { idx++; continue; } // truly exhausted — skip
+    seenTitles.add(title);
 
     const author = authors[idx % authors.length];
     const ansAuthor = answerAuthors[idx % answerAuthors.length];
@@ -855,22 +883,23 @@ const Q = (function(){
     const question = tmpl.q.replace(/{topic}/g, topic);
     const ansText = tmpl.a.replace(/{topic}/g, topic);
     const catCode = cat.replace('Oracle ', '').replace(/ - .*/, '').replace(/ /g, '').substring(0, 4).toUpperCase();
-    const qid = `Q-${catCode}-${String(idx).padStart(6, '0')}`;
     const dateStr = `${yr}-${String(months.indexOf(mo) + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
     const ansDate = `${yr}-${String(months.indexOf(mo) + 1).padStart(2, '0')}-${String(Math.min(day + 2, 28)).padStart(2, '0')}`;
 
     generated.push({
-      id: qid,
+      id: `Q-${catCode}-${String(idx).padStart(6, '0')}`,
       category: cat,
       title: title,
       question: question,
       status: 'Solved',
       author: author,
       date: dateStr,
-      replyCount: (idx % 8) + 2,
+      replyCount: (idx % 9) + 2,
       tags: tmpl.tags,
       answers: [{ user: ansAuthor, date: ansDate, text: ansText }]
     });
+
+    if (priorityCounts.hasOwnProperty(cat)) priorityCounts[cat]++;
     idx++;
   }
 
